@@ -1,0 +1,65 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Sun Mar  3 18:42:15 2024
+
+@author: cjlei
+"""
+
+import cv2
+import numpy as np
+
+# Flag to indicate whether two points have been selected
+point_selected = False
+points = []
+
+# Mouse callback function
+def mouse_callback(event, x, y, flags, param):
+    global point_selected, points
+
+    if event == cv2.EVENT_LBUTTONDOWN:
+        points.append((x, y))
+        if len(points) == 2:
+            point_selected = True
+
+# Read an image
+img = cv2.imread(r'C:\Users\cjlei\OneDrive\Documents\UF\Ferris_Lab\Overground Straight.png')
+gray_image = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+# Create a window and set the mouse callback
+cv2.namedWindow('Select Rectangle')
+cv2.setMouseCallback('Select Rectangle', mouse_callback)
+
+while True:
+    # Display the image
+    img_copy = gray_image.copy()
+    if len(points) == 1:
+        cv2.circle(img_copy, points[0], 5, (0, 255, 0), -1)
+    elif len(points) == 2:
+        cv2.rectangle(img_copy, points[0], points[1], (0, 255, 0), 2)
+
+    cv2.imshow('Select Rectangle', img_copy)
+
+    # Calculate mean and standard deviation if two points are selected
+    if point_selected:
+        roi = img[points[0][1]:points[1][1], points[0][0]:points[1][0]]
+        mean_intensity = np.mean(roi)
+        std_dev_intensity = np.std(roi)
+        print(f"Mean Intensity: {mean_intensity}, Standard Deviation: {std_dev_intensity}")
+        
+        # Calculate width and height of the rectangle
+        width = abs(points[1][0] - points[0][0])
+        height = abs(points[1][1] - points[0][1])
+    
+        # Calculate area
+        area = width * height
+        print(f"Area of the selected box: {area} pixels")
+        
+        # Reset points and flag
+        points = []
+        point_selected = False
+
+    # Break the loop if 'ESC' is pressed
+    if cv2.waitKey(1) == 27:
+        break
+
+cv2.destroyAllWindows()
