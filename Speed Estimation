@@ -1,0 +1,340 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Mar  1 18:05:22 2024
+
+@author: cjlei
+"""
+
+import cv2 #computer visualization
+import yaml #coordinates for ROI
+import numpy as np #math equations and calcs
+from datetime import datetime #time in video
+import openpyxl #interacting with excel
+import os #creating and using directories in local files
+import matplotlib.pyplot as plt #plotting and graphing
+
+# Start time for measuring processing time
+start_time = datetime.now()
+last_time = datetime.now()
+
+# Variables for counting objects and calculating speed
+ct = 0
+total_output = 0
+fastest = 0
+ppm = 0
+ppm_average = 0
+
+# Variables for caluclating speed for graph during trial
+time_positions = []
+average_speeds = []
+frame_counter = 0
+
+# Record counting every 'rec_qty'
+rec_qty = 8
+qty = 0
+
+# Prepare for Excel file
+path = r'C:/Users/cjlei/OneDrive/Documents/UF/Ferris_Lab/First Person Speed Estimation/Object Counting Conveyor/output_excel/'
+wb = openpyxl.Workbook()
+ws = wb.active
+ws.append(("datetime", "total_output", "minute", "average ppm", "ct", "ppm"))
+
+# YAML file path
+fn_yaml = r'C:/Users/cjlei/OneDrive/Documents/UF/Ferris_Lab/First Person Speed Estimation/Object Counting Conveyor/datasets/area.yml'
+
+# Directory containing video files
+video_directory = r'C:/Users/cjlei/OneDrive/Documents/UF/Ferris_Lab/First Person Speed Estimation/'
+
+# Check if the directory exists
+if os.path.isdir(video_directory):
+    print(f"Directory '{video_directory}' exists.")
+else:
+    print(f"Error: Directory '{video_directory}' does not exist.")
+
+# List all video files in the directory
+video_files = [f for f in os.listdir(video_directory) if f.endswith(('.mp4'))]
+
+# Loop through each video file
+for video_file in video_files:
+    video_path = os.path.join(video_directory, video_file)
+    
+    # Check if the file exists
+    if os.path.isfile(video_path):
+        print(f"Video file '{video_path}' exists.")
+        
+        # Set capture device (0 for built-in cam, 1 for USB cam)
+        cap = cv2.VideoCapture(video_path)
+        
+        # Check if the video capture object is successfully opened
+        if not cap.isOpened():
+            print("Error: Could not open video file")
+        
+        # Adjust output settings
+        fn_out = r'C:/Users/cjlei/OneDrive/Documents/UF/Ferris_Lab/First Person Speed Estimation/Trial Output Videos/output.mp4'
+
+        config = {'save_video': True,
+                  'text_overlay': True,
+                  'object_overlay': True,
+                  'object_id_overlay': False,
+                  'object_detection': True,
+                  'min_area_motion_contour': 60,
+                  'park_sec_to_wait': 0.001,
+                  'start_frame': 0}
+
+        video_info = {'width': int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                      'height': int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}
+        fps = cap.get(cv2.CAP_PROP_FPS)
+
+        # Define the codec and create VideoWriter object
+        if config['save_video']:
+            fourcc = cv2.VideoWriter_fourcc(*'XVID')
+            out = cv2.VideoWriter(fn_out, fourcc, fps, (video_info['width'], video_info['height']))
+
+        # Read YAML data
+        with open(fn_yaml, 'r') as stream:
+            object_area_data = yaml.safe_load(stream)
+            object_contours = []
+            object_bounding_rects = []
+            object_mask = []
+            for park in object_area_data:
+                points = np.array(park['points'])
+                rect = cv2.boundingRect(points)
+                points_shifted = points.copy()
+                points_shifted[:, 0] = points[:, 0] - rect[0]
+                points_shifted[:, 1] = points[:, 1] - rect[1]
+                object_contours.append(points)
+                object_bounding_rects.append(rect)
+                mask = cv2.drawContours(np.zeros((rect[3], rect[2]), dtype=np.uint8), [points_shifted],
+                                        contourIdx=-1, color=255, thickness=-1, lineType=cv2.LINE_8)
+                mask = mask == 255
+                object_mask.append(mask)
+
+        object_status = [False] * len(object_area_data)
+        object_buffer = [None] * len(object_area_data)
+
+        print("Program for counting objects that pass through box\nLarge frame size 960x720")
+        
+        frame_counter = 0
+        time_interval = 10 #seconds
+        
+        # Initialize variables for time tracking
+        last_time_pos_10_seconds = 0
+        time_elapsed = 0
+
+        # Initialize last time position for every 10 frames
+        last_time_pos_10_frames = 0
+        dashes_in_last_10_frames = []
+
+        # Main loop for processing each frame of the video
+        while(cap.isOpened()):
+            ret, frame = cap.read()
+            dash_length = 0.154
+            gap_length = 0.15
+            total_distance = 0
+            
+            if not ret:
+                print("Capture Error")
+                break
+            if frame is None:
+                print("End of Video")
+                break
+            if frame.size == 0:
+                print("Empty Frame")
+                continue
+
+            video_cur_pos = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+            video_cur_frame = cap.get(cv2.CAP_PROP_POS_FRAMES)
+
+            frame_blur = cv2.GaussianBlur(frame, (5, 5), 3)
+            frame_gray = cv2.cvtColor(frame_blur, cv2.COLOR_BGR2GRAY)
+            frame_out = frame.copy()
+            
+            time_elapsed = video_cur_pos - last_time_pos_10_seconds
+
+            if config['object_detection']:
+                for ind, park in enumerate(object_area_data):
+                    points = np.array(park['points'])
+                    rect = object_bounding_rects[ind]
+                    roi_gray = frame_gray[rect[1]:(rect[1] + rect[3]), rect[0]:(rect[0] + rect[2])]
+                    
+                    points[:, 0] = points[:, 0] - rect[0]
+                    points[:, 1] = points[:, 1] - rect[1]
+                    #HSV of yellow = [25-35 70-125 200-230]
+                    #status = np.std(roi_gray) > 30 and np.std(roi_gray) < 45 and np.mean(roi_gray) > 180 and np.mean(roi_gray) < 240
+                    status = np.std(roi_gray) < 30 and np.mean(roi_gray) > 45 #original
+                    #status = np.std(roi_gray) < 45 and np.mean(roi_gray) > 170
+
+                    if status != object_status[ind] and object_buffer[ind] == None:
+                        object_buffer[ind] = video_cur_pos
+
+                    elif status != object_status[ind] and object_buffer[ind] != None:
+                        if video_cur_pos - object_buffer[ind] > config['park_sec_to_wait']:
+                            if status == False:
+                                qty = qty + 1
+                                total_output = total_output + 1
+                                dashes_in_last_10_frames.append(qty)
+                                current_time = datetime.now()
+                                diff = current_time - last_time
+                                ct = diff.total_seconds()
+                                ppm = round(60 / ct, 2)
+                                last_time = current_time
+
+                                diff = current_time - start_time
+                                minutes = diff.total_seconds() / 60
+                                ppm_average = round(total_output / minutes, 2)
+
+                                if (ppm > fastest):
+                                    fastest = ppm
+                                    data = (current_time, total_output, minutes, ppm_average, ct, ppm)
+                                    ws.append(data)
+
+                                if (qty > rec_qty):
+                                    data = (current_time, total_output, minutes, ppm_average, ct, ppm)
+                                    ws.append(data)
+                                    qty = 0
+
+                            object_status[ind] = status
+                            object_status[ind] = status
+                            object_buffer[ind] = None
+
+                    elif status == object_status[ind] and object_buffer[ind] != None:
+                        object_buffer[ind] = None
+
+            if config['object_overlay']:
+                for ind, park in enumerate(object_area_data):
+                    points = np.array(park['points'])
+                    if object_status[ind]:
+                        color = (0, 255, 0)
+                    else:
+                        color = (0, 0, 255)
+                    cv2.drawContours(frame_out, [points], contourIdx=-1, color=color, thickness=2,
+                                     lineType=cv2.LINE_8)
+                    moments = cv2.moments(points)
+                    centroid = (int(moments['m10'] / moments['m00']) - 3, int(moments['m01'] / moments['m00']) + 3)
+                    cv2.putText(frame_out, str(park['id']), (centroid[0] + 1, centroid[1] + 1),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
+                    cv2.putText(frame_out, str(park['id']), (centroid[0] - 1, centroid[1] - 1),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
+                    cv2.putText(frame_out, str(park['id']), (centroid[0] + 1, centroid[1] - 1),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
+                    cv2.putText(frame_out, str(park['id']), (centroid[0] - 1, centroid[1] + 1),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
+                    cv2.putText(frame_out, str(park['id']), centroid, cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1,
+                                cv2.LINE_AA)
+
+            if config['text_overlay']:
+                cv2.rectangle(frame_out, (1, 5), (350, 70), (0, 255, 0), 2)
+                str_on_frame = "Object Counting:"
+                cv2.putText(frame_out, str_on_frame, (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2,
+                            cv2.LINE_AA)
+                str_on_frame = "Total Counting = %d, Speed (PPM) = %d" % (total_output, ppm)
+                cv2.putText(frame_out, str_on_frame, (5, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2,
+                            cv2.LINE_AA)
+                str_on_frame = "Fastest PPM: " + str(fastest) + ", Average: " + str(ppm_average)
+                cv2.putText(frame_out, str_on_frame, (5, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1,
+                            cv2.LINE_AA)
+
+            # Calculate average speed every 10 seconds
+            if time_elapsed >= time_interval:
+                # Calculate average speed in meters per second
+                total_output_10_seconds = sum(dashes_in_last_10_frames)
+                total_distance_10_seconds = total_output_10_seconds * (dash_length + gap_length)
+                average_speed_10_seconds = total_distance_10_seconds / time_interval
+        
+                # Store time position and average speed for plotting
+                time_positions.append(video_cur_pos)
+                average_speeds.append(average_speed_10_seconds)
+        
+# =============================================================================
+#                 # Print and plot average speed
+#                 print("Average Speed (10 seconds):", average_speed_10_seconds, "m/s")
+#                 plt.plot(time_positions, average_speeds, marker='o', linestyle='-')
+#                 plt.xlabel('Time (seconds)')
+#                 plt.ylabel('Average Speed (m/s)')
+#                 plt.title('Average Speed vs. Time')
+#                 plt.grid(True)
+#                 plt.show()
+# =============================================================================
+                
+                # Additional data points
+                additional_points = [(10, 1.3376), (20, 1.4288), (30, 1.2464), (40, 1.3680), (50, 1.2768)]
+                additional_points.sort()  # Sort points by x-coordinate
+                
+                # Print and plot average speed
+                print("Average Speed (10 seconds):", average_speed_10_seconds, "m/s")
+                plt.plot(time_positions, average_speeds, marker='o', linestyle='-', color='gray', label='Grayscale Dash Count')
+                plt.scatter([point[0] for point in additional_points], [point[1] for point in additional_points], color='black') #, label='Additional Points')
+                plt.plot([point[0] for point in additional_points], [point[1] for point in additional_points], linestyle='--', color='black', label='True Dash Count')
+                #plt.xlabel('Time (seconds)', fontsize=22)
+                #plt.ylabel('Average Speed (m/s)', fontsize=22)
+                #plt.title('Average Speed vs. Time', fontsize=16)
+                plt.xlim(0, max(time_positions))  # Adjust x-axis limit based on data
+                plt.xticks([0, 10, 20, 30, 40, 50, 60])
+                plt.ylim(0, 1.5)  # Set y-axis limit from 0 to 1.5
+                plt.yticks([0, 0.5, 1, 1.5])  # Set y-axis ticks
+                plt.tick_params(axis='both', which='major', labelsize=20)  # Increase font size of tick labels
+                plt.gca().spines['top'].set_visible(False)  # Remove top spine
+                plt.gca().spines['right'].set_visible(False)  # Remove right spine
+                plt.grid(False)  # Remove gridlines
+                #plt.legend()
+                # Specify directory to save the file
+                save_dir = r'C:/Users/cjlei/OneDrive/Documents/UF/Ferris_Lab/First Person Speed Estimation/'
+                #os.makedirs(save_dir, exist_ok=True)  # Create directory if it doesn't exist
+                
+                # Save plot as SVG file in the specified directory
+                plt.savefig(os.path.join(save_dir, 'average_speed_plot.svg'), format='svg')
+                plt.show()
+                
+                # Calculate RMSE for each pair of points
+                rmse_values = []
+                num_pairs = min(len(additional_points), len(time_positions), len(average_speeds))
+                for i in range(num_pairs):
+                    x_additional, y_additional = additional_points[i]
+                    x_original, y_original = time_positions[i], average_speeds[i]
+                    rmse = np.sqrt((x_additional - x_original)**2 + (y_additional - y_original)**2)
+                    rmse_values.append(rmse)
+                
+                # Print RMSE values
+                for i, rmse in enumerate(rmse_values):
+                    print(f"RMSE for pair {i+1}: {rmse}")
+                
+                # Calculate average RMSE
+                average_rmse = np.mean(rmse_values)
+                print("Average RMSE:", average_rmse)
+
+                # Reset variables for the next 10 seconds
+                dashes_in_last_10_frames = []
+                last_time_pos_10_seconds = video_cur_pos
+                        
+
+            # Display video
+            imS = cv2.resize(frame_out, (960, 720))
+            cv2.imshow('First Person Speed Estimation - by Caleb Leimer', imS)
+            k = cv2.waitKey(1)
+
+            cap.set(cv2.CAP_PROP_POS_FRAMES, video_cur_frame + 1)
+            if k == ord('q'):
+                break
+            elif k == ord('c'):
+                cv2.imwrite('frame%d.jpg' % video_cur_frame, frame_out)
+            elif k == ord('j'):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, video_cur_frame + 1000)
+
+        # Calculate average speed in meters per second
+        total_distance = total_output * (dash_length + gap_length)
+        total_time = cap.get(cv2.CAP_PROP_FRAME_COUNT) / cap.get(cv2.CAP_PROP_FPS)
+        average_speed = total_distance / total_time
+        
+        # Print and save average speed in meters per second
+        print("Total Dashes Passed:", total_output)
+        print("Total Distance Walked (Meters):", total_distance)
+        print("Total Time Walked (Seconds):", total_time)
+        print("Average Speed (Meters/Second):", average_speed)
+        
+        cap.release()
+        if config['save_video']:
+            out.release()
+        cv2.destroyAllWindows()
+
+# Save data to Excel file
+wb.save(path + "output_" + start_time.strftime("%d-%m-%Y %H-%M-%S") + ".xlsx")
